@@ -22,7 +22,7 @@
 
     <div class="justify-content-center mt-4 row">
         <div class="col-lg-6 col-md-12 col-sm-12 mt-4">
-            <h3>User ID: <%= user.user_id %></h3>
+            <h3>User ID: <%= user._id %></h3>
             <h3>Name: <%= user.username %></h3>
             <h3>Email: <%= user.email %></h3>
         </div>
@@ -35,12 +35,6 @@
     </div>
 
     <div class="mt-4 mx-auto">
-        <form action="/update" method="GET" style="display: inline;">
-            <button type="submit" class="btn btn-outline-success fs-5">Update User</button>
-        </form>
-        <form action="/password" method="GET" style="display: inline;">
-            <button type="submit" class="btn btn-outline-success fs-5">Change Password</button>
-        </form>
         <form action="/logout" method="GET" style="display: inline;">
             <button type="submit" class="btn btn-outline-secondary fs-5">Log Out</button>
         </form>

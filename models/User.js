@@ -2,15 +2,6 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
 const userSchema = new mongoose.Schema({
-    user_id: {
-        type: Number,
-        required: true,
-        unique: true,
-        validate: {
-            validator: Number.isInteger,
-            message: 'user_id must be an integer',
-        },
-    },
     username: { type: String, required: true},
     password: { type: String, required: true},
     email: { type: String, required: true, unique: true },

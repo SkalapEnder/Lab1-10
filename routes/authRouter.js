@@ -2,12 +2,15 @@ const express = require('express');
 const User = require('../models/User');
 const mongoose = require("mongoose");
 const bcrypt = require('bcryptjs');
-const passport = require('passport');
 const jwt = require('jsonwebtoken');
 const { MailerSend, EmailParams, Sender, Recipient } = require("mailersend");
-const LocalStrategy = require('passport-local');
 const { body, validationResult } = require('express-validator');
 const crypto = require('crypto');
+const authMiddleware = require('../authMiddleware');
+
+const passport = require('passport');
+const LocalStrategy = require('passport-local');
+
 require('dotenv').config();
 const router = express.Router();
 
@@ -15,30 +18,68 @@ mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('Auth: Connected to MongoDB Atlas'))
     .catch((err) => console.error('Error connecting to MongoDB Atlas:', err));
 
+
+passport.use(new LocalStrategy({ usernameField: 'email' }, async (email, password, done) => {
+    try {
+        const user = await User.findOne({ email: email });
+        if (user === null) return done(null, false, { message: 'Invalid email or password' });
+
+        const isMatch = await bcrypt.compare(password, user.password);
+        if (!isMatch) return done(null, false, { message: 'Invalid email or password' });
+
+        return done(null, user);
+    } catch (err) {
+        return done(err);
+    }
+}));
+
+passport.serializeUser((user, done) => done(null, user._id));
+passport.deserializeUser(async (id, done) => {
+    try {
+        const user = await User.findById(id);
+        done(null, user);
+    } catch (err) {
+        done(err);
+    }
+});
+
+
 const isAuthenticated = (req, res, next) => {
     if (req.isAuthenticated()) return next();
     res.redirect('/login');
 };
 
-const authMiddleware = (req, res, next) => {
-    const token = req.cookies.token;
+router.get('/api/profile', authMiddleware, async (req, res) => {
+    try {
+        const user = await User.findById(req.user.userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        res.json({ username: user.username, email: user.email });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error' });
+    }
+});
 
-    if (!token) {
-        return res.status(401).json({ errorMessage: 'Unauthorized: No token provided' });
+router.post('/api/login', async (req, res) => {
+    const { email, password } = req.body;
+
+    const user = await User.findOne({ email: email });
+    if (!user) {
+        return res.status(401).json({ message: 'Invalid email' });
     }
 
-    jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-        if (err) {
-            return res.status(401).json({ errorMessage: 'Unauthorized: Invalid token' });
-        }
-        req.user = decoded; // Store user info in request object
-        next();
-    });
-};
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+        return res.status(401).json({ message: 'Invalid password' });
+    }
 
-const mailerSend = new MailerSend({
-    apiKey: process.env.API_KEY,
+    // Generate JWT
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.json({ token });
 });
+
+const mailerSend = new MailerSend({ apiKey: process.env.API_KEY, });
 
 const sendEmail = async (to, subject, html) => {
     try {
@@ -63,30 +104,6 @@ const sendEmail = async (to, subject, html) => {
         return false;
     }
 };
-
-passport.use(new LocalStrategy({ usernameField: 'email' }, async (email, password, done) => {
-    try {
-        const user = await User.findOne({ email: email });
-        if (user === null) return done(null, false, { message: 'Invalid email or password' });
-
-        const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch) return done(null, false, { message: 'Invalid email or password' });
-
-        return done(null, user);
-    } catch (err) {
-        return done(err);
-    }
-}));
-
-passport.serializeUser((user, done) => done(null, user.user_id));
-passport.deserializeUser(async (id, done) => {
-    try {
-        const user = await User.findOne({user_id: id});
-        done(null, user);
-    } catch (err) {
-        done(err);
-    }
-});
 
 // REGISTER part
 router.get('/register', (req, res) => res.render('auth/registration'));
@@ -113,12 +130,7 @@ router.post('/register',
             return res.status(400).json({ errorMessage: 'User already exists' });
         }
 
-        const userId = await getNextFreeUserId();
-        if (isNaN(userId)) {
-            return res.status(500).json({ errorMessage: 'Failed to generate a valid user_id' });
-        }
         const newUser = new User({
-            user_id: userId,
             username: username,
             email: email,
             password: password,
@@ -144,109 +156,33 @@ router.post('/login', async (req, res) => {
             return res.status(400).json({ errorMessage: 'Invalid credentials' });
         }
 
-        res.session.userId = user.user_id;
-        res.session.username = user.username;
-        res.session.isLoggedIn = true;
+        req.session.userId = user._id;
+        req.session.username = user.username;
+        req.session.isLoggedIn = true;
 
-        const token = jwt.sign({ userId: user.user_id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-        res.cookie('token', token, { httpOnly: true, secure: process.env.NODE_ENV === 'production' });
+        const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+
+        res.cookie('token', token, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'Strict'
+        });
 
         res.redirect('/');
     } catch (err) {
-        res.status(500).json({ errorMessage: 'Error logging in' });
-    }
-});
-
-// UPDATE part
-router.get('/update', authMiddleware, async (req, res) => {
-    const user = await getUser(req.session.userId);
-    if (user === null) {
-        return res.render('templates/error', {errorMessage: 'User not found'});
-    }
-    res.render('profile/update', {user});
-})
-
-router.post('/update', authMiddleware, async (req, res) => {
-    const { user_id, username, email } = req.body;
-
-    try {
-        const updateData = {
-            username: username,
-            email: email,
-            updatedAt: new Date(),
-        };
-
-        const updatedUser = await User.findOneAndUpdate(
-            {user_id: user_id},
-            {$set: updateData}
-        );
-        if (updatedUser === null) {
-            return res.status(500).send({errorMessage: 'Error updating user'});
-        }
-        req.session.username = username;
-        res.redirect('/profile');
-    } catch (err) {
-        return res.status(500).send({errorMessage: 'Error updating user'});
+        console.log(err)
+        res.status(500).json({ errorMessage: 'Error logging in:' + err });
     }
 });
 
 // USER part
-router.get('/profile', authMiddleware, async (req, res) => {
+router.get('/profile', authMiddleware, isAuthenticated, async (req, res) => {
     const user = await getUser(req.session.userId);
     if (user === null) {
         return res.render('templates/error', {errorMessage: 'User not found'});
     }
     return res.render('profile/profile', {user});
 });
-
-// Protected Profile Route
-router.get('/api/profile', authMiddleware, async (req, res) => {
-    try {
-        const user = await User.findById(req.user.userId).select('-password');
-        if (!user) return res.status(404).json({ errorMessage: 'User not found' });
-
-        res.json(user);
-    } catch (err) {
-        res.status(500).json({ errorMessage: 'Error retrieving profile' });
-    }
-});
-
-router.get('/password', authMiddleware, async (req, res) => res.render('profile/password'))
-
-router.post('/password', authMiddleware, [
-    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
-        .matches(/[A-Z]/).withMessage('Password must contain an uppercase letter')
-        .matches(/[a-z]/).withMessage('Password must contain a lowercase letter')
-        .matches(/[0-9]/).withMessage('Password must contain a number')
-        .matches(/[@$!%*?&]/).withMessage('Password must contain a special character')
-],
-    async (req, res) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-        return res.status(400).json({ errorMessage: errors.array()[0]['msg'] });
-    }
-
-    const { oldPassword, password } = req.body;
-
-    try {
-        // Fetch user from database
-        const user = await getUser(req.session.userId);
-        if (user === null) {
-            return res.status(404).send({ errorMessage: 'User not found' });
-        }
-
-        if (!await bcrypt.compare(oldPassword, user.password)) {
-            return res.status(401).send({ errorMessage: 'Invalid old password' });
-        }
-
-        // Hash and save new password
-        user.password = password;
-        await user.save();
-        res.redirect('/profile')
-    } catch (err){
-        return res.status(500).send({errorMessage:'Error creating new password: ', err});
-    }
-})
 
 router.get('/password-reset', (req, res) => res.render('reset/reset_password'));
 
@@ -332,7 +268,7 @@ router.post('/password-reset/:token', [
 router.get('/reset-success', (req, res) => res.render('reset/reset_password_success'))
 
 // LOG OUT part
-router.get('/logout', authMiddleware, (req, res) => {
+router.get('/logout', authMiddleware, isAuthenticated, (req, res) => {
     req.session.destroy((err) => {
         if (err) {
             res.render('templates/error', {errorMessage: 'Error logging out'});
@@ -342,11 +278,11 @@ router.get('/logout', authMiddleware, (req, res) => {
     });
 });
 
-router.get('/delete-account', authMiddleware, async (req, res) => {
+router.get('/delete-account', authMiddleware, isAuthenticated, async (req, res) => {
     const userId = req.session.userId;
 
     try {
-        const deletedUser = await User.findOneAndDelete({ user_id: userId });
+        const deletedUser = await User.findByIdAndDelete(userId);
         if (deletedUser === null) {
             return res.render('templates/error', {errorMessage: 'User not found or not deleted'});
         }
@@ -360,18 +296,8 @@ router.get('/delete-account', authMiddleware, async (req, res) => {
 
 // Helpers
 async function getUser(id){
-    const user = await User.findOne({ user_id: id });
+    const user = await User.findById(id);
     if (user === null) return null;
     return user;
 }
-
-async function getNextFreeUserId() {
-    try {
-        const lastUser = await User.findOne().sort({ user_id: -1 });
-        return lastUser ? lastUser.user_id + 1 : 0;
-    } catch (err) {
-        throw new Error('Failed to retrieve next free user ID');
-    }
-}
-
 module.exports = router;
